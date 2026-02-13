@@ -1,0 +1,1 @@
+export const VIOLATION_TYPES = ['Speed', 'Red Light'];
