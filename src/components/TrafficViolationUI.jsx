@@ -496,20 +496,28 @@ import {
   Camera,
   AlertTriangle,
   Car,
-  Clock,
-  MapPin,
-  FileText,
-  Activity,
   TrendingUp,
   Bell,
+  Upload,
+  Loader2,
+  ImageIcon,
+  CheckCircle2,
+  XCircle,
 } from "lucide-react";
 import { useViolationsSocket } from "../hooks/useViolationsSocket";
+
+const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 export default function TrafficViolationUI() {
   const violations = useViolationsSocket();
 
   const [currentTime, setCurrentTime] = useState(new Date());
   const [newViolationAlert, setNewViolationAlert] = useState(false);
+  // Manual image upload (POST /detect/image)
+  const [imageUploading, setImageUploading] = useState(false);
+  const [imageUploadResult, setImageUploadResult] = useState(null);
+  const [imageUploadError, setImageUploadError] = useState("");
+  const [imagePreview, setImagePreview] = useState(null);
 
   const [stats, setStats] = useState({
     totalViolations: 0,
@@ -526,17 +534,62 @@ export default function TrafficViolationUI() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (imagePreview) URL.revokeObjectURL(imagePreview);
+    };
+  }, [imagePreview]);
+
+  useEffect(() => {
     if (violations.length > 0) {
+      const totalFines = violations.reduce((sum, v) => sum + (v.fine || 0), 0);
       setStats(prev => ({
         ...prev,
         totalViolations: violations.length,
-        finesGenerated: violations.length * 1000
+        finesGenerated: totalFines,
       }));
-
       setNewViolationAlert(true);
       setTimeout(() => setNewViolationAlert(false), 3000);
     }
   }, [violations]);
+
+  const handleImageUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file || !file.type.startsWith("image/")) {
+      setImageUploadError("Please select an image (JPG or PNG).");
+      setImagePreview(null);
+      return;
+    }
+    setImageUploadError("");
+    setImageUploadResult(null);
+    if (imagePreview) URL.revokeObjectURL(imagePreview);
+    setImagePreview(URL.createObjectURL(file));
+    setImageUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 600000);
+      const res = await fetch(`${API_BASE}/detect/image`, {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || res.statusText || "Upload failed");
+      setImageUploadResult(data);
+    } catch (err) {
+      const msg = err.name === "AbortError" ? "Request timed out (10 minutes). Try again or check backend logs." : (err.message || "Upload failed");
+      setImageUploadError(
+        msg.includes("fetch") || msg.includes("Failed") || msg.includes("timed out")
+          ? `${msg} — Backend: ${API_BASE}`
+          : msg
+      );
+    } finally {
+      setImageUploading(false);
+      e.target.value = "";
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -562,6 +615,105 @@ export default function TrafficViolationUI() {
           <StatCard icon={Camera} value={stats.activeCameras} label="Active Cameras" />
           <StatCard icon={Car} value={stats.vehiclesMonitored} label="Vehicles Monitored" />
           <StatCard icon={TrendingUp} value={`₹${stats.finesGenerated}`} label="Fines Generated" />
+        </div>
+
+        <div className="bg-white rounded shadow p-4 mb-6">
+          <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
+            <ImageIcon className="w-5 h-5 text-blue-600" />
+            Upload Traffic Image for Violation Detection
+          </h2>
+          <p className="text-sm text-gray-600 mb-3">
+            Upload a traffic image (JPG/PNG) to detect Helmet Violation, Triple Riding, or No Violation.
+          </p>
+          <div className="flex flex-wrap items-center gap-3 mb-3">
+            <label className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 cursor-pointer disabled:opacity-50">
+              {imageUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+              <span>{imageUploading ? "Analyzing image..." : "Choose image"}</span>
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/jpg"
+                className="hidden"
+                disabled={imageUploading}
+                onChange={handleImageUpload}
+              />
+            </label>
+            <span className="text-sm text-gray-500">JPG or PNG only</span>
+          </div>
+          {imageUploadError && (
+            <p className="mt-2 text-sm text-red-600">{imageUploadError}</p>
+          )}
+          {imageUploading && (
+            <p className="mt-2 text-sm text-blue-600">Running detection... (3-8 sec on CPU)</p>
+          )}
+          {imagePreview && (
+            <div className="mt-3">
+              <p className="text-sm text-gray-600 mb-2">Preview:</p>
+              <img
+                src={imagePreview}
+                alt="Traffic image"
+                className="max-h-64 rounded-lg border border-gray-200 object-contain"
+              />
+            </div>
+          )}
+          {imageUploadResult && (
+            <div className="mt-4 p-4 rounded-lg border bg-white shadow-sm">
+              <h3 className="text-sm font-semibold text-gray-700 mb-3">Detection Result</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <span className="text-xs text-gray-500">Vehicle Number</span>
+                  <p className="font-medium text-gray-900">{imageUploadResult.vehicle_number}</p>
+                </div>
+                <div>
+                  <span className="text-xs text-gray-500">Violation Type</span>
+                  <p className="font-medium flex items-center gap-2">
+                    {imageUploadResult.violation_type === "None" ? (
+                      <>
+                        <CheckCircle2 className="w-5 h-5 text-green-600" />
+                        <span className="text-green-700">No Violation</span>
+                      </>
+                    ) : (
+                      <>
+                        <XCircle className="w-5 h-5 text-red-600" />
+                        <span className="text-red-700">{imageUploadResult.violation_type}</span>
+                      </>
+                    )}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-xs text-gray-500">Confidence</span>
+                  <p className="font-medium text-gray-900">
+                    {imageUploadResult.confidence != null
+                      ? `${(imageUploadResult.confidence * 100).toFixed(0)}%`
+                      : "—"}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-xs text-gray-500">Timestamp</span>
+                  <p className="font-medium text-gray-900 text-sm">
+                    {imageUploadResult.timestamp
+                      ? new Date(imageUploadResult.timestamp).toLocaleString()
+                      : "—"}
+                  </p>
+                </div>
+                {imageUploadResult.fine != null && imageUploadResult.fine > 0 && (
+                  <div>
+                    <span className="text-xs text-gray-500">Fine Generated</span>
+                    <p className="font-medium text-red-600">₹{imageUploadResult.fine}</p>
+                  </div>
+                )}
+              </div>
+              {imageUploadResult.image_url && (
+                <div className="mt-3 pt-3 border-t border-gray-200">
+                  <span className="text-xs text-gray-500 block mb-2">Stored evidence</span>
+                  <img
+                    src={`${API_BASE}${imageUploadResult.image_url}`}
+                    alt="Violation evidence"
+                    className="max-h-48 rounded border border-gray-200 object-contain"
+                  />
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="bg-white rounded shadow p-4">

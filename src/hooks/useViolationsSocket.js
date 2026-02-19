@@ -9,7 +9,8 @@ export function useViolationsSocket() {
 
     console.log("Connecting to WebSocket...");
 
-    const socket = new WebSocket("ws://127.0.0.1:8000/ws/violations");
+    const wsUrl = import.meta.env.VITE_WS_VIOLATIONS_URL || "ws://127.0.0.1:8000/ws/violations";
+    const socket = new WebSocket(wsUrl);
     socketRef.current = socket;
 
     socket.onopen = () => {
@@ -17,9 +18,12 @@ export function useViolationsSocket() {
     };
 
     socket.onmessage = (event) => {
-      console.log("Received:", event.data);
-      const data = JSON.parse(event.data);
-      setViolations(prev => [data, ...prev]);
+      try {
+        const data = JSON.parse(event.data);
+        setViolations(prev => [data, ...prev]);
+      } catch (_) {
+        console.warn("Invalid WebSocket message:", event.data);
+      }
     };
 
     socket.onerror = (error) => {

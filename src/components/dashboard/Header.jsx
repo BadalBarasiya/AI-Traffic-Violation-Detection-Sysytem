@@ -9,7 +9,7 @@ export default function Header({ time }) {
         {/* <Activity /> */}
         <h1 className="font-bold">AI Traffic Dashboard</h1>
       </div>
-      <div>{time.toLocaleTimeString()}</div>
+      <div>{time != null ? time.toLocaleTimeString() : '--'}</div>
     </div>
   );
 }

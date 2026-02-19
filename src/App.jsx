@@ -9,10 +9,9 @@ function App() {
 
 
   return (
-    <div>
-            <Header time={time} />
-
-      <TrafficViolationUI/>
+    <div className="min-h-screen">
+      <Header time={time} />
+      <TrafficViolationUI />
     </div>
   )
 } 
