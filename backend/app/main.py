@@ -1,15 +1,20 @@
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile 
+from fastapi.middleware.cors import CORSMiddleware 
+from fastapi.staticfiles import StaticFiles 
+from pydantic import BaseModel 
 import cv2
 import asyncio
 import random
 import threading
-import numpy as np
+from concurrent.futures import ThreadPoolExecutor
+import numpy as np 
 from datetime import datetime, timezone
+
+# Dedicated thread pool for YOLO inference (avoids blocking other async work)
+INFERENCE_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="inference")
+INFERENCE_TIMEOUT_SEC = 45
 
 from app.detector import YOLODetector
 from app.violation_logic import check_violations, check_image_upload_violations
@@ -43,16 +48,17 @@ detector = _load_detector()
 
 
 def _warmup_detector():
-    """Run a dummy inference so first real request is fast."""
+    """Run a dummy inference in the inference pool so first upload is fast."""
     try:
-        dummy = np.zeros((224, 224, 3), dtype=np.uint8)
-        detector.detect(dummy, imgsz=224)
+        dummy = np.zeros((320, 320, 3), dtype=np.uint8)
+        detector.detect(dummy, imgsz=320)
         print("Model warmup done.")
     except Exception as e:
         print("Warmup skipped:", e)
 
 
-threading.Thread(target=_warmup_detector, daemon=True).start()
+# Warm up model in the same executor used for requests
+INFERENCE_EXECUTOR.submit(_warmup_detector)
 
 LOCATIONS = ["SG Highway", "CG Road", "Ashram Road", "Ring Road", "Satellite", "Paldi"]
 VEHICLE_PREFIXES = ["GJ-01-AB", "GJ-05-CD", "GJ-27-EF", "GJ-18-GH"]
@@ -99,6 +105,7 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close()
         return
 
+    loop = asyncio.get_event_loop()
     try:
         while True:
             ret, frame = cap.read()
@@ -107,8 +114,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 await asyncio.sleep(0.5)
                 continue
 
-            # Run YOLO detection
-            detections = detector.detect(frame)
+            # Run YOLO detection in dedicated thread pool (imgsz=320 for speed)
+            detections = await loop.run_in_executor(
+                INFERENCE_EXECUTOR, lambda f=frame: detector.detect(f, imgsz=320)
+            )
 
             # Check violation logic
             violations = check_violations(detections)
@@ -137,8 +146,13 @@ async def websocket_endpoint(websocket: WebSocket):
 # ---------- Manual Image Upload: POST /detect/image ----------
 
 
+def _random_plate() -> str:
+    """Return a random plate number (e.g. GJ-01-AB-1234). Used when OCR is not available or fails."""
+    return f"{random.choice(VEHICLE_PREFIXES)}-{random.randint(1000, 9999)}"
+
+
 def _get_vehicle_number_from_ocr(_image) -> str:
-    """Placeholder for future OCR. Returns UNKNOWN for now."""
+    """Placeholder for future OCR. Returns UNKNOWN for now; caller should use _random_plate() as fallback."""
     return "UNKNOWN"
 
 
@@ -166,7 +180,7 @@ async def detect_image(file: UploadFile = File(...)):
             detail="Image too large for real-time detection. Please upload a resized image (e.g. <= 1280x720).",
         )
 
-    # Resize large images to speed up inference
+    # Aggressive resize for fast CPU inference (small image = fast analysis)
     max_size = 256
     if max(h, w) > max_size:
         scale = max_size / max(h, w)
@@ -175,12 +189,22 @@ async def detect_image(file: UploadFile = File(...)):
 
     loop = asyncio.get_event_loop()
     try:
-        detections = await loop.run_in_executor(None, lambda: detector.detect(frame, imgsz=224))
+        detections = await asyncio.wait_for(
+            loop.run_in_executor(INFERENCE_EXECUTOR, lambda: detector.detect(frame, imgsz=192)),
+            timeout=INFERENCE_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail="Analysis took too long. Try a smaller image (e.g. under 800px) or try again.",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference failure: {str(e)}")
 
     violation_type, confidence = check_image_upload_violations(detections)
     vehicle_number = _get_vehicle_number_from_ocr(frame)
+    if not vehicle_number or vehicle_number == "UNKNOWN":
+        vehicle_number = _random_plate()
 
     # Generate fine and store image when violation detected
     fine = FINES.get(violation_type, 0) if violation_type != "None" else 0
@@ -194,6 +218,8 @@ async def detect_image(file: UploadFile = File(...)):
         filepath.write_bytes(contents)
         image_url = f"/violations/{filename}"
 
+    location = random.choice(LOCATIONS) if violation_type != "None" else None
+
     return {
         "vehicle_number": vehicle_number,
         "violation_type": violation_type,
@@ -201,6 +227,7 @@ async def detect_image(file: UploadFile = File(...)):
         "fine": fine,
         "image_url": image_url,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "location": location,
     }
 
 
@@ -222,7 +249,23 @@ async def api_detect_upload(file: UploadFile = File(...)):
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if frame is None:
         raise HTTPException(status_code=400, detail="Could not decode image. Use JPEG or PNG.")
-    detections = detector.detect(frame)
+    # Resize large images for faster inference
+    h, w = frame.shape[:2]
+    max_size = 320
+    if max(h, w) > max_size:
+        scale = max_size / max(h, w)
+        frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    loop = asyncio.get_event_loop()
+    try:
+        detections = await asyncio.wait_for(
+            loop.run_in_executor(INFERENCE_EXECUTOR, lambda: detector.detect(frame, imgsz=256)),
+            timeout=INFERENCE_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=503,
+            detail="Analysis took too long. Try a smaller image or try again.",
+        )
     violations = check_violations(detections)
     result_violations = []
     for v in violations:
@@ -304,7 +347,7 @@ def api_reload_model():
 
 
 def main():
-    import uvicorn
+    import uvicorn # pyright: ignore[reportMissingImports]
     uvicorn.run(app, host="0.0.0.0", port=8000)
 
 

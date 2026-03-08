@@ -16,7 +16,8 @@ class YOLODetector:
         self.model_path = path
         self.class_names = names or (list(self.model.names.values()) if hasattr(self.model, "names") else None)
 
-    def detect(self, frame, imgsz=640, verbose=False, max_det=30):
+    def detect(self, frame, imgsz=320, verbose=False, max_det=20):
+        """Run YOLO inference. Use imgsz=320 for speed; 640 for higher accuracy."""
         results = self.model(frame, conf=0.45, imgsz=imgsz, verbose=verbose, max_det=max_det)
         detections = []
         names = self.class_names or (getattr(self.model, "names", None) or {})

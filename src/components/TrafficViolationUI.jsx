@@ -503,13 +503,16 @@ import {
   ImageIcon,
   CheckCircle2,
   XCircle,
+  FileText,
 } from "lucide-react";
 import { useViolationsSocket } from "../hooks/useViolationsSocket";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const LOCATIONS = ["SG Highway", "CG Road", "Ashram Road", "Ring Road", "Satellite", "Paldi"];
+const randomLocation = () => LOCATIONS[Math.floor(Math.random() * LOCATIONS.length)];
 
 export default function TrafficViolationUI() {
-  const violations = useViolationsSocket();
+  const [violations, addViolation] = useViolationsSocket();
 
   const [currentTime, setCurrentTime] = useState(new Date());
   const [newViolationAlert, setNewViolationAlert] = useState(false);
@@ -568,7 +571,7 @@ export default function TrafficViolationUI() {
       const formData = new FormData();
       formData.append("file", file);
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 600000);
+      const timeoutId = setTimeout(() => controller.abort(), 60000);
       const res = await fetch(`${API_BASE}/detect/image`, {
         method: "POST",
         body: formData,
@@ -576,12 +579,31 @@ export default function TrafficViolationUI() {
       });
       clearTimeout(timeoutId);
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.detail || res.statusText || "Upload failed");
+      const detail = Array.isArray(data.detail) ? data.detail[0]?.msg || data.detail : data.detail;
+      if (!res.ok) {
+        if (res.status === 503) throw new Error(detail || "Analysis took too long. Try a smaller image.");
+        throw new Error(detail || res.statusText || "Upload failed");
+      }
       setImageUploadResult(data);
+      if (data.violation_type && data.violation_type !== "None") {
+        const timeStr = data.timestamp
+          ? new Date(data.timestamp).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" })
+          : new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+        addViolation({
+          id: `V${Math.floor(1000 + Math.random() * 9000)}`,
+          type: data.violation_type,
+          vehicle: data.vehicle_number || "UNKNOWN",
+          speed: "-",
+          time: timeStr,
+          location: data.location || randomLocation(),
+          fine: data.fine ?? 0,
+          status: "Pending",
+        });
+      }
     } catch (err) {
-      const msg = err.name === "AbortError" ? "Request timed out (10 minutes). Try again or check backend logs." : (err.message || "Upload failed");
+      const msg = err.name === "AbortError" ? "Request timed out. Try a smaller image (under 800px) or check backend." : (err.message || "Upload failed");
       setImageUploadError(
-        msg.includes("fetch") || msg.includes("Failed") || msg.includes("timed out")
+        msg.includes("fetch") || msg.includes("Failed") || msg.includes("timed out") || msg.includes("too long")
           ? `${msg} — Backend: ${API_BASE}`
           : msg
       );
@@ -601,23 +623,74 @@ export default function TrafficViolationUI() {
         </div>
       )}
 
-      <div className="bg-blue-700 text-white p-6">
-        <h1 className="text-2xl font-bold">
-          AI Traffic Violation Detection System
-        </h1>
-        <p>{currentTime.toLocaleTimeString()}</p>
+      <div id="dashboard" className="bg-blue-700 text-white p-6 scroll-mt-16">
+        <div className="mx-auto flex max-w-6xl items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold">
+              AI Traffic Violation Detection System
+            </h1>
+            <p className="text-sm text-blue-100">
+              Live violations and image-based detection in one dashboard.
+            </p>
+          </div>
+          <div className="text-right text-sm">
+            <div className="text-blue-100">Current Time</div>
+            <div className="text-lg font-semibold">
+              {currentTime.toLocaleTimeString()}
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="p-6">
 
-        <div className="grid grid-cols-4 gap-4 mb-6">
+        <div className="mx-auto mb-4 max-w-6xl grid grid-cols-1 gap-4 md:grid-cols-4">
           <StatCard icon={AlertTriangle} value={stats.totalViolations} label="Total Violations" />
           <StatCard icon={Camera} value={stats.activeCameras} label="Active Cameras" />
           <StatCard icon={Car} value={stats.vehiclesMonitored} label="Vehicles Monitored" />
           <StatCard icon={TrendingUp} value={`₹${stats.finesGenerated}`} label="Fines Generated" />
         </div>
 
-        <div className="bg-white rounded shadow p-4 mb-6">
+        {/* Compact view of the very latest violations on the dashboard */}
+        {violations.length > 0 && (
+          <div className="mx-auto mb-6 max-w-6xl rounded-lg bg-white p-4 shadow">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-sm font-semibold text-gray-800">
+                Latest Violations (top 3)
+              </h2>
+              <span className="text-xs text-gray-500">
+                Showing most recent entries from the Recent Violations table.
+              </span>
+            </div>
+            <div className="space-y-2">
+              {violations.slice(0, 3).map((v) => (
+                <div
+                  key={v.id}
+                  className="flex items-center justify-between rounded-md border border-gray-100 bg-gray-50 px-3 py-2 text-xs md:text-sm"
+                >
+                  <div className="flex flex-col gap-0.5">
+                    <span className="font-semibold text-gray-900">{v.type}</span>
+                    <span className="text-gray-600">
+                      {v.vehicle} • {v.location} • {v.time}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    {v.fine != null && v.fine > 0 && (
+                      <div className="text-sm font-semibold text-red-600">
+                        ₹{v.fine}
+                      </div>
+                    )}
+                    <div className="text-[11px] font-medium text-gray-500">
+                      {v.status || "Pending"}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div id="upload" className="bg-white rounded shadow p-4 mb-6 scroll-mt-16">
           <h2 className="text-lg font-semibold mb-3 flex items-center gap-2">
             <ImageIcon className="w-5 h-5 text-blue-600" />
             Upload Traffic Image for Violation Detection
@@ -716,17 +789,96 @@ export default function TrafficViolationUI() {
           )}
         </div>
 
-        <div className="bg-white rounded shadow p-4">
-          <h2 className="text-lg font-semibold mb-4">Recent Violations</h2>
-
-          {violations.map(v => (
-            <div key={v.id} className="border-b py-2">
-              <div className="font-semibold">{v.type}</div>
-              <div className="text-sm text-gray-600">
-                {v.vehicle} • {v.time} • {v.location}
-              </div>
-            </div>
-          ))}
+        <div id="recent" className="bg-white rounded-lg shadow scroll-mt-16">
+          <div className="p-4 border-b border-gray-200">
+            <h2 className="text-lg font-semibold flex items-center gap-2">
+              <FileText className="w-5 h-5 text-blue-600" />
+              Recent Violations
+              <span className="ml-auto text-xs bg-red-500 text-white px-2 py-1 rounded-full">
+                {violations.filter((v) => v.status === "Pending").length} New
+              </span>
+            </h2>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    ID
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Type
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Vehicle
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Time
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Location
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Fine
+                  </th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Status
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {violations.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-8 text-center text-gray-500">
+                      No violations detected yet. Connect to WebSocket or upload an image.
+                    </td>
+                  </tr>
+                ) : (
+                  violations.map((v, index) => (
+                    <tr
+                      key={v.id}
+                      className={`hover:bg-gray-50 transition-colors ${
+                        index === 0 ? "bg-amber-50" : ""
+                      }`}
+                    >
+                      <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                        {v.id}
+                      </td>
+                      <td className="px-4 py-3 text-sm">
+                        <span className="flex items-center gap-1.5">
+                          <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+                          {v.type}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-sm font-medium text-gray-900">
+                        {v.vehicle}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-600">
+                        {v.time}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-600">
+                        {v.location}
+                      </td>
+                      <td className="px-4 py-3 text-sm font-medium text-red-600">
+                        {v.fine != null ? `₹${v.fine}` : "—"}
+                      </td>
+                      <td className="px-4 py-3 text-sm">
+                        <span
+                          className={`inline-flex px-2 py-1 rounded-full text-xs font-medium ${
+                            v.status === "Pending"
+                              ? "bg-amber-100 text-amber-800"
+                              : "bg-green-100 text-green-800"
+                          }`}
+                        >
+                          {v.status || "Pending"}
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
 
       </div>
