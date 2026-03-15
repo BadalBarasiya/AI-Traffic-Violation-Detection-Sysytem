@@ -1,15 +1,21 @@
 from pathlib import Path
+import base64
+import json
+import hmac
+import hashlib
+import os
+from typing import Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile 
-from fastapi.middleware.cors import CORSMiddleware 
-from fastapi.staticfiles import StaticFiles 
-from pydantic import BaseModel 
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, Header, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 import cv2
 import asyncio
 import random
 import threading
 from concurrent.futures import ThreadPoolExecutor
-import numpy as np 
+import numpy as np
 from datetime import datetime, timezone
 
 # Dedicated thread pool for YOLO inference (avoids blocking other async work)
@@ -35,6 +41,109 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ---------- Simple auth (admin & user roles) ----------
+
+AUTH_SECRET_KEY = os.getenv("AUTH_SECRET_KEY", "change-me-in-production")
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    username: str
+    role: str
+
+
+class CurrentUser(BaseModel):
+    username: str
+    role: str
+
+
+# Demo users – replace with real DB in production.
+USERS_DB = {
+    "admin": {"password": "admin123", "role": "admin"},
+    "user": {"password": "user123", "role": "user"},
+}
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("utf-8")
+
+
+def _b64url_decode(data: str) -> bytes:
+    padding = "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(data + padding)
+
+
+def _create_token(payload: dict) -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    signature = hmac.new(AUTH_SECRET_KEY.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    sig_b64 = _b64url_encode(signature)
+    return f"{header_b64}.{payload_b64}.{sig_b64}"
+
+
+def _decode_token(token: str) -> dict:
+    try:
+        header_b64, payload_b64, sig_b64 = token.split(".")
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid token format.")
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    expected_sig = hmac.new(AUTH_SECRET_KEY.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    actual_sig = _b64url_decode(sig_b64)
+    if not hmac.compare_digest(expected_sig, actual_sig):
+        raise HTTPException(status_code=401, detail="Invalid token signature.")
+    payload_bytes = _b64url_decode(payload_b64)
+    try:
+        return json.loads(payload_bytes.decode("utf-8"))
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token payload.")
+
+
+async def get_current_user(authorization: Optional[str] = Header(None)) -> CurrentUser:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated.")
+    token = authorization.split(" ", 1)[1]
+    payload = _decode_token(token)
+    username = payload.get("sub")
+    role = payload.get("role", "user")
+    user = USERS_DB.get(username or "")
+    if not user or user.get("role") != role:
+        raise HTTPException(status_code=401, detail="Invalid user.")
+    return CurrentUser(username=username, role=role)
+
+
+async def get_current_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return user
+
+
+@app.post("/api/auth/login", response_model=TokenResponse)
+def login(req: LoginRequest):
+    user = USERS_DB.get(req.username)
+    if not user or user["password"] != req.password:
+        raise HTTPException(status_code=401, detail="Incorrect username or password.")
+    token = _create_token({"sub": req.username, "role": user["role"]})
+    return TokenResponse(access_token=token, username=req.username, role=user["role"])
+
+
+@app.get("/api/auth/me", response_model=CurrentUser)
+async def auth_me(current: CurrentUser = Depends(get_current_user)):
+    return current
+
+
+@app.get("/api/admin/ping")
+async def admin_ping(admin: CurrentUser = Depends(get_current_admin)):
+    return {"message": "ok", "username": admin.username, "role": admin.role}
 
 
 def _load_detector():

@@ -555,6 +555,14 @@ export default function TrafficViolationUI() {
     }
   }, [violations]);
 
+  const pendingFineAmount = violations
+    .filter((v) => v.status === "Pending")
+    .reduce((sum, v) => sum + (v.fine || 0), 0);
+
+  const paidFineAmount = violations
+    .filter((v) => v.status && v.status !== "Pending")
+    .reduce((sum, v) => sum + (v.fine || 0), 0);
+
   const handleImageUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file || !file.type.startsWith("image/")) {
@@ -644,11 +652,27 @@ export default function TrafficViolationUI() {
 
       <div className="p-6">
 
-        <div className="mx-auto mb-4 max-w-6xl grid grid-cols-1 gap-4 md:grid-cols-4">
-          <StatCard icon={AlertTriangle} value={stats.totalViolations} label="Total Violations" />
-          <StatCard icon={Camera} value={stats.activeCameras} label="Active Cameras" />
-          <StatCard icon={Car} value={stats.vehiclesMonitored} label="Vehicles Monitored" />
-          <StatCard icon={TrendingUp} value={`₹${stats.finesGenerated}`} label="Fines Generated" />
+        <div className="mx-auto mb-4 grid max-w-6xl grid-cols-1 gap-4 md:grid-cols-4">
+          <StatCard
+            icon={AlertTriangle}
+            value={stats.totalViolations}
+            label="Total Violations"
+          />
+          <StatCard
+            icon={TrendingUp}
+            value={`₹${pendingFineAmount}`}
+            label="Pending Fines"
+          />
+          <StatCard
+            icon={TrendingUp}
+            value={`₹${paidFineAmount}`}
+            label="Paid Fines"
+          />
+          <StatCard
+            icon={Camera}
+            value={stats.activeCameras}
+            label="Active Cameras"
+          />
         </div>
 
         {/* Compact view of the very latest violations on the dashboard */}

@@ -1,5 +1,5 @@
 import React from "react";
-import { LayoutDashboard, ImageUp, ListChecks, X } from "lucide-react";
+import { LayoutDashboard, ImageUp, ListChecks, X, LogOut } from "lucide-react";
 
 const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", href: "#dashboard", icon: LayoutDashboard },
@@ -7,7 +7,7 @@ const NAV_ITEMS = [
   { id: "recent", label: "Recent Violations", href: "#recent", icon: ListChecks },
 ];
 
-export default function Sidebar({ open, onClose }) {
+export default function Sidebar({ open, onClose, user, onLogout }) {
   return (
     <>
       {/* Mobile overlay */}
@@ -29,6 +29,11 @@ export default function Sidebar({ open, onClose }) {
           <div>
             <div className="text-sm text-gray-500">AI Traffic</div>
             <div className="text-lg font-bold text-gray-900">Dashboard</div>
+            {user && (
+              <div className="mt-1 text-xs text-gray-500">
+                {user.username} ({user.role})
+              </div>
+            )}
           </div>
           <button
             type="button"
@@ -57,8 +62,18 @@ export default function Sidebar({ open, onClose }) {
           </ul>
         </nav>
 
-        <div className="mt-auto p-4 text-xs text-gray-500">
-          Tip: Upload an image to add a violation to the list.
+        <div className="mt-auto flex items-center justify-between border-t border-gray-200 p-4 text-xs text-gray-500">
+          <span>Upload an image to add a violation.</span>
+          {onLogout && (
+            <button
+              type="button"
+              onClick={onLogout}
+              className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-medium text-red-600 hover:bg-red-50"
+            >
+              <LogOut className="h-3 w-3" />
+              Logout
+            </button>
+          )}
         </div>
       </aside>
     </>
